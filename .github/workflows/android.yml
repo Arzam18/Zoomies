@@ -1,0 +1,115 @@
+
+name: Zoomies Android Bionic ARM64 AOT
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout Zoomies
+        uses: actions/checkout@v4
+
+      - name: Set up .NET 10
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Install build utilities
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y file binutils
+
+      - name: Install Android NDK
+        uses: android-actions/setup-android@v3
+
+      - name: Configure Android NDK
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          SDK="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
+          test -n "$SDK"
+
+          NDK="$(find "$SDK/ndk" -mindepth 1 -maxdepth 1 \
+            -type d | sort -V | tail -n 1)"
+
+          if [ -z "$NDK" ]; then
+            echo "ERROR: Android NDK was not installed."
+            exit 1
+          fi
+
+          NDK_BIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
+
+          test -x "$NDK_BIN/clang"
+          test -x "$NDK_BIN/ld.lld"
+
+          echo "$NDK_BIN" >> "$GITHUB_PATH"
+          echo "ANDROID_NDK_ROOT=$NDK" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_HOME=$NDK" >> "$GITHUB_ENV"
+
+          echo "Using NDK: $NDK"
+
+      - name: Verify NNUE network
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ -f nnue/best.nnue ]; then
+            echo "NNUE network found and will be embedded."
+            ls -lh nnue/best.nnue
+          else
+            echo "No nnue/best.nnue file exists."
+            echo "The project will build without that resource."
+          fi
+
+      - name: Publish NativeAOT ARM64
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          rm -rf out
+
+          dotnet publish src/Zoomies.csproj \
+            --configuration Release \
+            --framework net10.0 \
+            --runtime linux-bionic-arm64 \
+            --self-contained true \
+            --output out \
+            -p:PublishAot=true \
+            -p:PublishSingleFile=false \
+            -p:InvariantGlobalization=true
+
+          test -s out/zoomies
+
+      - name: Verify native executable
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          file out/zoomies
+
+          readelf -h out/zoomies | grep -E 'Class:|Machine:'
+          readelf -h out/zoomies | grep -q AArch64
+
+          echo "ELF interpreter:"
+          readelf -l out/zoomies \
+            | grep 'Requesting program interpreter' || true
+
+          echo "Dynamic dependencies:"
+          readelf -d out/zoomies | grep NEEDED || true
+
+          echo "SHA-256:"
+          sha256sum out/zoomies
+
+      - name: Upload Zoomies ARM64 executable
+        uses: actions/upload-artifact@v4
+        with:
+          name: zoomies-android-bionic-arm64
+          path: out/zoomies
+          if-no-files-found: error
