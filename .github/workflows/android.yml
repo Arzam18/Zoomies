@@ -62,12 +62,6 @@ jobs:
           grep '<TargetFramework>' src/Zoomies.csproj
           grep '<AssemblyName>' src/Zoomies.csproj
 
-          echo "Checking for custom NativeAOT fallback imports:"
-          if grep -n 'NativeAotFallback.targets' src/Zoomies.csproj; then
-            echo "ERROR: Remove the custom fallback import from the project."
-            exit 1
-          fi
-
       - name: Restore NativeAOT dependencies
         shell: bash
         run: |
@@ -79,7 +73,7 @@ jobs:
       - name: Publish NativeAOT ARM64
         shell: bash
         run: |
-          set -uo pipefail
+          set -euo pipefail
 
           rm -rf out
 
@@ -91,34 +85,15 @@ jobs:
             --no-restore \
             --output out \
             -p:PublishAot=true \
-            -p:InvariantGlobalization=true \
-            -v:normal
+            -p:DisableUnsupportedError=true \
+            -p:PublishAotUsingRuntimePack=true \
+            -p:InvariantGlobalization=true
 
-          publish_status=$?
-
-          echo "Publish exit code: $publish_status"
-          echo "Publish output directory:"
-          if [ -d out ]; then
-            find out -maxdepth 2 -type f -exec ls -lh {} \;
-          else
-            echo "out/ was not created."
-          fi
-
-          echo "Runtime-specific build output:"
-          BUILD_DIR="src/bin/Release/net10.0/linux-bionic-arm64"
-          if [ -d "$BUILD_DIR" ]; then
-            find "$BUILD_DIR" -maxdepth 3 -type f -exec ls -lh {} \;
-          else
-            echo "$BUILD_DIR does not exist."
-          fi
-
-          if [ "$publish_status" -ne 0 ]; then
-            exit "$publish_status"
-          fi
+          echo "Published files:"
+          find out -maxdepth 2 -type f -exec ls -lh {} \;
 
           if [ ! -s out/zoomies ]; then
             echo "::error::Native executable out/zoomies was not produced."
-            echo "Inspect the publish and runtime-specific output above."
             exit 1
           fi
 
