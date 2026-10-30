@@ -21,52 +21,66 @@ jobs:
           dotnet-version: 10.0.x
 
       - name: Install build utilities
-        shell: bash
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y curl unzip file binutils
+          sudo apt-get install -y curl unzip file binutils python3
 
       - name: Install Android NDK
         shell: bash
         run: |
           set -euo pipefail
 
-          NDK_ARCHIVE="$RUNNER_TEMP/android-ndk-r27c-linux.zip"
-          NDK_URL="https://dl.google.com/android/repository/android-ndk-r27c-linux.zip"
-
           curl --fail --location --retry 3 \
-            "$NDK_URL" -o "$NDK_ARCHIVE"
+            https://dl.google.com/android/repository/android-ndk-r27c-linux.zip \
+            -o "$RUNNER_TEMP/android-ndk.zip"
 
-          unzip -q "$NDK_ARCHIVE" -d "$RUNNER_TEMP"
+          unzip -q "$RUNNER_TEMP/android-ndk.zip" -d "$RUNNER_TEMP"
 
-          NDK_ROOT="$RUNNER_TEMP/android-ndk-r27c"
-          NDK_BIN="$NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          NDK="$RUNNER_TEMP/android-ndk-r27c"
+          BIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
 
-          test -x "$NDK_BIN/clang"
-          test -x "$NDK_BIN/ld.lld"
+          test -x "$BIN/clang"
+          test -x "$BIN/ld.lld"
 
-          echo "$NDK_BIN" >> "$GITHUB_PATH"
-          echo "ANDROID_NDK_ROOT=$NDK_ROOT" >> "$GITHUB_ENV"
-          echo "ANDROID_NDK_HOME=$NDK_ROOT" >> "$GITHUB_ENV"
+          echo "$BIN" >> "$GITHUB_PATH"
+          echo "ANDROID_NDK_ROOT=$NDK" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_HOME=$NDK" >> "$GITHUB_ENV"
 
-      - name: Verify project configuration
+      - name: Add Android NativeAOT runtime-pack download
         shell: bash
         run: |
           set -euo pipefail
 
-          test -f src/Zoomies.csproj
-          dotnet --info
-          grep -n 'TargetFramework' src/Zoomies.csproj || true
+          python3 - <<'PY'
+          from pathlib import Path
+
+          project = Path("src/Zoomies.csproj")
+          source = project.read_text()
+
+          if "</Project>" not in source:
+              raise SystemExit("Cannot find closing Project element.")
+
+          item = """
+            <ItemGroup>
+              <PackageDownload Include="Microsoft.NETCore.App.Runtime.NativeAOT.linux-bionic-arm64"
+                               Version="[$(BundledNETCoreAppPackageVersion)]" />
+            </ItemGroup>
+          """
+
+          if "Microsoft.NETCore.App.Runtime.NativeAOT.linux-bionic-arm64" not in source:
+              source = source.replace("</Project>", item + "\n</Project>", 1)
+              project.write_text(source)
+
+          print("Configured Android ARM64 NativeAOT runtime-pack download.")
+          PY
 
       - name: Add NativeAOT runtime-pack fallback
         shell: bash
         run: |
           set -euo pipefail
 
-          mkdir -p .github/workflows
-
-          cat > .github/workflows/nativeaot-fallback.targets <<'XML'
+          cat > "$RUNNER_TEMP/nativeaot-fallback.targets" <<'XML'
           <Project>
             <Target Name="_ResolveNativeAotSdkAssembliesFallback"
                     AfterTargets="SetupProperties"
@@ -76,29 +90,29 @@ jobs:
                     and '$(RuntimeIdentifier)' != ''">
 
               <PropertyGroup>
-                <_IlcPackageVersion>$([System.IO.Path]::GetFileName($([System.IO.Path]::GetDirectoryName($([System.IO.Path]::GetDirectoryName($(ILCompilerTargetsPath)))))))</_IlcPackageVersion>
-                <_NativeAotRuntimePackBase>$(NuGetPackageRoot)microsoft.netcore.app.runtime.nativeaot.$(RuntimeIdentifier)$([System.IO.Path]::DirectorySeparatorChar)$(_IlcPackageVersion)$([System.IO.Path]::DirectorySeparatorChar)runtimes$([System.IO.Path]::DirectorySeparatorChar)$(RuntimeIdentifier)$([System.IO.Path]::DirectorySeparatorChar)</_NativeAotRuntimePackBase>
+                <_AotPackVersion>$(BundledNETCoreAppPackageVersion)</_AotPackVersion>
+                <_AotPackRoot>$(NuGetPackageRoot)microsoft.netcore.app.runtime.nativeaot.$(RuntimeIdentifier)/$(_AotPackVersion)/runtimes/$(RuntimeIdentifier)/</_AotPackRoot>
               </PropertyGroup>
 
-              <PropertyGroup Condition="Exists('$(_NativeAotRuntimePackBase)native')">
-                <IlcSdkPath>$(_NativeAotRuntimePackBase)native$([System.IO.Path]::DirectorySeparatorChar)</IlcSdkPath>
-                <IlcFrameworkNativePath>$(_NativeAotRuntimePackBase)native$([System.IO.Path]::DirectorySeparatorChar)</IlcFrameworkNativePath>
-                <IlcFrameworkPath>$(_NativeAotRuntimePackBase)lib$([System.IO.Path]::DirectorySeparatorChar)net10.0$([System.IO.Path]::DirectorySeparatorChar)</IlcFrameworkPath>
+              <PropertyGroup Condition="Exists('$(_AotPackRoot)native')">
+                <IlcSdkPath>$(_AotPackRoot)native/</IlcSdkPath>
+                <IlcFrameworkNativePath>$(_AotPackRoot)native/</IlcFrameworkNativePath>
+                <IlcFrameworkPath>$(_AotPackRoot)lib/net10.0/</IlcFrameworkPath>
               </PropertyGroup>
 
-              <ItemGroup Condition="Exists('$(_NativeAotRuntimePackBase)native')">
+              <ItemGroup Condition="Exists('$(_AotPackRoot)native')">
                 <PrivateSdkAssemblies Include="$(IlcSdkPath)*.dll" />
-                <FrameworkAssemblies Include="$(IlcFrameworkPath)*.dll" />
+                <FrameworkAssemblies Include="$(IlcFrameworkPath)**/*.dll" />
                 <DefaultFrameworkAssemblies Include="@(FrameworkAssemblies)" />
                 <DefaultFrameworkAssemblies Include="@(PrivateSdkAssemblies)" Exclude="@(DefaultFrameworkAssemblies)" />
               </ItemGroup>
 
               <Message Importance="High"
-                       Condition="Exists('$(_NativeAotRuntimePackBase)native')"
-                       Text="NativeAOT fallback: resolved assemblies from $(_NativeAotRuntimePackBase)" />
+                       Condition="Exists('$(_AotPackRoot)native')"
+                       Text="Resolved NativeAOT runtime pack from $(_AotPackRoot)" />
 
-              <Warning Condition="!Exists('$(_NativeAotRuntimePackBase)native')"
-                       Text="NativeAOT fallback: runtime pack not found at $(_NativeAotRuntimePackBase)" />
+              <Error Condition="!Exists('$(_AotPackRoot)native')"
+                     Text="NativeAOT runtime pack is missing at $(_AotPackRoot). Check PackageDownload and NuGet restore." />
             </Target>
           </Project>
           XML
@@ -113,6 +127,26 @@ jobs:
             -p:PublishAot=true \
             -p:SelfContained=true
 
+      - name: Verify NativeAOT runtime pack
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          PACK="$HOME/.nuget/packages/microsoft.netcore.app.runtime.nativeaot.linux-bionic-arm64"
+
+          if [ ! -d "$PACK" ]; then
+            echo "::error::NativeAOT runtime pack was not restored."
+            exit 1
+          fi
+
+          find "$PACK" -maxdepth 5 -type d | head -80
+
+          NATIVE_DIR="$(find "$PACK" -type d -path '*/runtimes/linux-bionic-arm64/native' -print -quit)"
+          test -n "$NATIVE_DIR"
+          test -d "$NATIVE_DIR"
+
+          echo "Found runtime-pack native directory: $NATIVE_DIR"
+
       - name: Publish NativeAOT ARM64
         shell: bash
         run: |
@@ -121,16 +155,15 @@ jobs:
           rm -rf out
 
           dotnet publish src/Zoomies.csproj \
-            --configuration Release \
-            --framework net10.0 \
-            --runtime linux-bionic-arm64 \
+            -c Release \
+            -f net10.0 \
+            -r linux-bionic-arm64 \
             --self-contained true \
             --no-restore \
-            --output out \
+            -o out \
             -p:PublishAot=true \
-            -p:PublishSingleFile=false \
             -p:InvariantGlobalization=true \
-            -p:CustomAfterMicrosoftCommonTargets="$GITHUB_WORKSPACE/.github/workflows/nativeaot-fallback.targets"
+            -p:CustomAfterMicrosoftCommonTargets="$RUNNER_TEMP/nativeaot-fallback.targets"
 
           test -s out/zoomies
 
@@ -140,18 +173,8 @@ jobs:
           set -euo pipefail
 
           file out/zoomies
-
           readelf -h out/zoomies | grep -E 'Class:|Machine:'
           readelf -h out/zoomies | grep -q AArch64
-
-          echo "Interpreter:"
-          readelf -l out/zoomies \
-            | grep 'Requesting program interpreter' || true
-
-          echo "Dynamic dependencies:"
-          readelf -d out/zoomies | grep NEEDED || true
-
-          echo "SHA-256:"
           sha256sum out/zoomies
 
       - name: Upload Zoomies Android ARM64
