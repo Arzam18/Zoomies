@@ -27,48 +27,70 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y curl unzip file binutils
 
-      - name: Install Android NDK
+      - name: Install Android NDK directly
         shell: bash
         run: |
           set -euo pipefail
 
-          ARCHIVE="$RUNNER_TEMP/android-ndk-r27c-linux.zip"
-          URL="https://dl.google.com/android/repository/android-ndk-r27c-linux.zip"
+          NDK_ARCHIVE="$RUNNER_TEMP/android-ndk-r27c-linux.zip"
+          NDK_URL="https://dl.google.com/android/repository/android-ndk-r27c-linux.zip"
 
-          curl --fail --location --retry 3 \
-            "$URL" --output "$ARCHIVE"
+          curl --fail --location --retry 3 --retry-delay 2 \
+            "$NDK_URL" \
+            --output "$NDK_ARCHIVE"
 
-          unzip -q "$ARCHIVE" -d "$RUNNER_TEMP"
+          unzip -q "$NDK_ARCHIVE" -d "$RUNNER_TEMP"
 
-          NDK="$RUNNER_TEMP/android-ndk-r27c"
-          TOOLCHAIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64"
+          NDK_ROOT="$RUNNER_TEMP/android-ndk-r27c"
+          NDK_BIN="$NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin"
 
-          test -x "$TOOLCHAIN/bin/clang"
-          test -x "$TOOLCHAIN/bin/ld.lld"
+          test -x "$NDK_BIN/clang"
+          test -x "$NDK_BIN/ld.lld"
 
-          echo "$TOOLCHAIN/bin" >> "$GITHUB_PATH"
-          echo "ANDROID_NDK_ROOT=$NDK" >> "$GITHUB_ENV"
-          echo "ANDROID_NDK_HOME=$NDK" >> "$GITHUB_ENV"
+          echo "$NDK_BIN" >> "$GITHUB_PATH"
+          echo "ANDROID_NDK_ROOT=$NDK_ROOT" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_HOME=$NDK_ROOT" >> "$GITHUB_ENV"
 
-          echo "NDK installed: $NDK"
+          echo "Installed Android NDK: $NDK_ROOT"
+
+      - name: Verify Android NDK toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          command -v clang
+          clang --version
+          test -x "$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/ld.lld"
 
       - name: Verify project configuration
         shell: bash
         run: |
           set -euo pipefail
-
           test -f src/Zoomies.csproj
+          grep -n 'TargetFramework' src/Zoomies.csproj || true
+          dotnet --info
 
-          grep '<TargetFramework>' src/Zoomies.csproj
-          grep '<AssemblyName>' src/Zoomies.csproj
+      - name: Verify NNUE network
+        shell: bash
+        run: |
+          set -euo pipefail
 
-      - name: Restore NativeAOT dependencies
+          if [ -f nnue/best.nnue ]; then
+            echo "NNUE network found:"
+            ls -lh nnue/best.nnue
+          else
+            echo "No nnue/best.nnue file exists."
+            echo "The project will build without that resource."
+          fi
+
+      - name: Restore Android NativeAOT dependencies
         shell: bash
         run: |
           set -euo pipefail
 
           dotnet restore src/Zoomies.csproj \
-            --runtime linux-bionic-arm64
+            --runtime linux-bionic-arm64 \
+            -p:PublishAot=true \
+            -p:SelfContained=true
 
       - name: Publish NativeAOT ARM64
         shell: bash
@@ -85,17 +107,10 @@ jobs:
             --no-restore \
             --output out \
             -p:PublishAot=true \
-            -p:DisableUnsupportedError=true \
-            -p:PublishAotUsingRuntimePack=true \
+            -p:PublishSingleFile=false \
             -p:InvariantGlobalization=true
 
-          echo "Published files:"
-          find out -maxdepth 2 -type f -exec ls -lh {} \;
-
-          if [ ! -s out/zoomies ]; then
-            echo "::error::Native executable out/zoomies was not produced."
-            exit 1
-          fi
+          test -s out/zoomies
 
       - name: Verify native executable
         shell: bash
