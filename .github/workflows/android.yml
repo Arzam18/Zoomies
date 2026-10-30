@@ -21,39 +21,45 @@ jobs:
           dotnet-version: 10.0.x
 
       - name: Install build utilities
+        shell: bash
         run: |
+          set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y file binutils
+          sudo apt-get install -y curl unzip file binutils
 
-      - name: Install Android NDK
-        uses: android-actions/setup-android@v3
-
-      - name: Configure Android NDK
+      - name: Install Android NDK directly
         shell: bash
         run: |
           set -euo pipefail
 
-          SDK="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
-          test -n "$SDK"
+          NDK_ARCHIVE="$RUNNER_TEMP/android-ndk-r27c-linux.zip"
+          NDK_URL="https://dl.google.com/android/repository/android-ndk-r27c-linux.zip"
 
-          NDK="$(find "$SDK/ndk" -mindepth 1 -maxdepth 1 \
-            -type d | sort -V | tail -n 1)"
+          curl --fail --location --retry 3 --retry-delay 2 \
+            "$NDK_URL" \
+            --output "$NDK_ARCHIVE"
 
-          if [ -z "$NDK" ]; then
-            echo "ERROR: Android NDK was not installed."
-            exit 1
-          fi
+          unzip -q "$NDK_ARCHIVE" -d "$RUNNER_TEMP"
 
-          NDK_BIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          NDK_ROOT="$RUNNER_TEMP/android-ndk-r27c"
+          NDK_BIN="$NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin"
 
           test -x "$NDK_BIN/clang"
           test -x "$NDK_BIN/ld.lld"
 
           echo "$NDK_BIN" >> "$GITHUB_PATH"
-          echo "ANDROID_NDK_ROOT=$NDK" >> "$GITHUB_ENV"
-          echo "ANDROID_NDK_HOME=$NDK" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_ROOT=$NDK_ROOT" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_HOME=$NDK_ROOT" >> "$GITHUB_ENV"
 
-          echo "Using NDK: $NDK"
+          echo "Installed Android NDK: $NDK_ROOT"
+
+      - name: Verify Android NDK toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          command -v clang
+          clang --version
+          test -x "$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/ld.lld"
 
       - name: Verify NNUE network
         shell: bash
@@ -61,7 +67,7 @@ jobs:
           set -euo pipefail
 
           if [ -f nnue/best.nnue ]; then
-            echo "NNUE network found and will be embedded."
+            echo "NNUE network found:"
             ls -lh nnue/best.nnue
           else
             echo "No nnue/best.nnue file exists."
