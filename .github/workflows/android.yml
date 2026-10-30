@@ -21,60 +21,105 @@ jobs:
           dotnet-version: 10.0.x
 
       - name: Install build utilities
-        shell: bash
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y curl unzip file binutils
+          sudo apt-get install -y curl unzip file binutils python3
 
-      - name: Install Android NDK directly
+      - name: Install Android NDK
         shell: bash
         run: |
           set -euo pipefail
 
-          NDK_ARCHIVE="$RUNNER_TEMP/android-ndk-r27c-linux.zip"
-          NDK_URL="https://dl.google.com/android/repository/android-ndk-r27c-linux.zip"
+          ARCHIVE="$RUNNER_TEMP/android-ndk.zip"
 
-          curl --fail --location --retry 3 --retry-delay 2 \
-            "$NDK_URL" \
-            --output "$NDK_ARCHIVE"
+          curl --fail --location --retry 3 \
+            https://dl.google.com/android/repository/android-ndk-r27c-linux.zip \
+            --output "$ARCHIVE"
 
-          unzip -q "$NDK_ARCHIVE" -d "$RUNNER_TEMP"
+          unzip -q "$ARCHIVE" -d "$RUNNER_TEMP"
 
-          NDK_ROOT="$RUNNER_TEMP/android-ndk-r27c"
-          NDK_BIN="$NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          NDK="$RUNNER_TEMP/android-ndk-r27c"
+          TOOLCHAIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64"
 
-          test -x "$NDK_BIN/clang"
-          test -x "$NDK_BIN/ld.lld"
+          test -x "$TOOLCHAIN/bin/clang"
+          test -x "$TOOLCHAIN/bin/ld.lld"
 
-          echo "$NDK_BIN" >> "$GITHUB_PATH"
-          echo "ANDROID_NDK_ROOT=$NDK_ROOT" >> "$GITHUB_ENV"
-          echo "ANDROID_NDK_HOME=$NDK_ROOT" >> "$GITHUB_ENV"
+          echo "$TOOLCHAIN/bin" >> "$GITHUB_PATH"
+          echo "ANDROID_NDK_ROOT=$NDK" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_HOME=$NDK" >> "$GITHUB_ENV"
 
-          echo "Installed Android NDK: $NDK_ROOT"
-
-      - name: Verify Android NDK toolchain
-        shell: bash
-        run: |
-          set -euo pipefail
-          command -v clang
-          clang --version
-          test -x "$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/ld.lld"
-
-      - name: Verify NNUE network
+      - name: Add NativeAOT runtime-pack fallback
         shell: bash
         run: |
           set -euo pipefail
 
-          if [ -f nnue/best.nnue ]; then
-            echo "NNUE network found:"
-            ls -lh nnue/best.nnue
-          else
-            echo "No nnue/best.nnue file exists."
-            echo "The project will build without that resource."
-          fi
+          cat > src/NativeAotFallback.targets <<'XML'
+          <Project>
+            <Target
+              Name="_ResolveNativeAotSdkAssembliesFallback"
+              AfterTargets="SetupProperties"
+              BeforeTargets="_ComputeAssembliesToCompileToNative"
+              Condition="'$(PublishAot)' == 'true'
+                and '@(PrivateSdkAssemblies)' == ''
+                and '$(RuntimeIdentifier)' != ''">
 
-      - name: Publish NativeAOT ARM64
+              <PropertyGroup>
+                <_IlcPackageVersion>$([System.IO.Path]::GetFileName($([System.IO.Path]::GetDirectoryName($([System.IO.Path]::GetDirectoryName($(ILCompilerTargetsPath)))))))</_IlcPackageVersion>
+                <_NativeAotRuntimePackBase>$(NuGetPackageRoot)microsoft.netcore.app.runtime.nativeaot.$(RuntimeIdentifier)/$(_IlcPackageVersion)/runtimes/$(RuntimeIdentifier)/</_NativeAotRuntimePackBase>
+              </PropertyGroup>
+
+              <PropertyGroup Condition="Exists('$(_NativeAotRuntimePackBase)native')">
+                <IlcSdkPath>$(_NativeAotRuntimePackBase)native/</IlcSdkPath>
+                <IlcFrameworkNativePath>$(_NativeAotRuntimePackBase)native/</IlcFrameworkNativePath>
+                <IlcFrameworkPath>$(_NativeAotRuntimePackBase)lib/net10.0/</IlcFrameworkPath>
+              </PropertyGroup>
+
+              <ItemGroup Condition="Exists('$(_NativeAotRuntimePackBase)native')">
+                <PrivateSdkAssemblies Include="$(IlcSdkPath)*.dll" />
+                <FrameworkAssemblies Include="$(IlcFrameworkPath)*.dll" />
+                <DefaultFrameworkAssemblies Include="@(FrameworkAssemblies)" />
+                <DefaultFrameworkAssemblies Include="@(PrivateSdkAssemblies)" Exclude="@(DefaultFrameworkAssemblies)" />
+              </ItemGroup>
+
+              <Message
+                Importance="High"
+                Condition="Exists('$(_NativeAotRuntimePackBase)native')"
+                Text="NativeAOT fallback: resolved SDK assemblies from $(_NativeAotRuntimePackBase)" />
+
+              <Error
+                Condition="!Exists('$(_NativeAotRuntimePackBase)native')"
+                Text="NativeAOT fallback failed: runtime pack not found at $(_NativeAotRuntimePackBase). Check the restored runtime pack version and path." />
+            </Target>
+          </Project>
+          XML
+
+          python3 <<'PY'
+          from pathlib import Path
+
+          path = Path("src/Zoomies.csproj")
+          source = path.read_text()
+          import_line = '  <Import Project="NativeAotFallback.targets" />'
+
+          if 'NativeAotFallback.targets' not in source:
+              if '</Project>' not in source:
+                  raise SystemExit("ERROR: Missing closing Project element.")
+              source = source.rsplit('</Project>', 1)[0]
+              source += import_line + '\n</Project>\n'
+              path.write_text(source)
+
+          print("NativeAOT fallback imported into Zoomies.csproj")
+          PY
+
+      - name: Restore Android NativeAOT dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          dotnet restore src/Zoomies.csproj \
+            --runtime linux-bionic-arm64
+
+      - name: Publish Android ARM64 executable
         shell: bash
         run: |
           set -euo pipefail
@@ -86,10 +131,11 @@ jobs:
             --framework net10.0 \
             --runtime linux-bionic-arm64 \
             --self-contained true \
+            --no-restore \
             --output out \
             -p:PublishAot=true \
-            -p:PublishSingleFile=false \
-            -p:InvariantGlobalization=true
+            -p:InvariantGlobalization=true \
+            -p:SysRoot="$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/sysroot"
 
           test -s out/zoomies
 
@@ -110,10 +156,9 @@ jobs:
           echo "Dynamic dependencies:"
           readelf -d out/zoomies | grep NEEDED || true
 
-          echo "SHA-256:"
           sha256sum out/zoomies
 
-      - name: Upload Zoomies ARM64 executable
+      - name: Upload Zoomies Android ARM64
         uses: actions/upload-artifact@v4
         with:
           name: zoomies-android-bionic-arm64
